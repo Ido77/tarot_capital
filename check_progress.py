@@ -11,8 +11,12 @@ from datetime import datetime
 
 def check_progress():
     """Check the current processing progress"""
-    print("📊 PARALLEL PROCESSING STATUS")
-    print("=" * 60)
+    print("🚀 OPTIMIZED PSU BATCH PROCESSOR - PROGRESS CHECK")
+    print("=" * 80)
+    print("⚡ Intelligent SEC rate limiting (8 req/sec)")
+    print("⚡ 3 parallel workers with connection pooling")
+    print("⚡ Quality controls: 3-month search, min 2 targets")
+    print("")
     
     # Check if progress file exists
     progress_file = "parallel_batch_progress.json"

@@ -167,8 +167,9 @@ class PSUPriceExtractorAPINinjas:
             print(f"🔍 Extracting PSU targets for {ticker.upper()}")
             
             # Get current stock price
+            print(f"  Getting current stock price...")
             price_data = self.api_client.get_stock_price(ticker)
-            if not price_data or not price_data.get('price'):
+            if not price_data:
                 return {
                     'ticker': ticker.upper(),
                     'error': f"Could not get current stock price for {ticker}",
@@ -184,7 +185,7 @@ class PSUPriceExtractorAPINinjas:
                     'search_months_back': 3
                 }
             
-            current_price = float(price_data['price'])
+            current_price = float(price_data)  # price_data is already a float
             print(f"  Current price: ${current_price}")
             
             # Get Form 4 filings
@@ -215,12 +216,12 @@ class PSUPriceExtractorAPINinjas:
                 try:
                     filing_date = filing.get('filing_date')
                     filing_url = filing.get('filing_url')
-                    form_type = filing.get('form_type')
+                    form_type = filing.get('form', '4')  # Default to Form 4
                     
                     print(f"    Analyzing {filing_date} - {form_type}")
                     
-                    # Download filing content
-                    content = self.api_client.download_filing_content(filing_url)
+                    # Download filing content (pass the entire filing dict)
+                    content = self.api_client.download_filing_content(filing)
                     if not content:
                         print(f"      ❌ Could not download content")
                         continue  # Skip adding to filings_analyzed if no content

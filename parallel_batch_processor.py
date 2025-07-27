@@ -16,6 +16,8 @@ import traceback
 import concurrent.futures
 from threading import Lock
 import queue
+import threading
+import requests # Added for retry logic
 
 from psu_extractor_api_ninjas import PSUPriceExtractorAPINinjas
 
@@ -30,18 +32,18 @@ class ParallelBatchProcessor:
         self.progress_file = "parallel_batch_progress.json"
         self.log_file = "parallel_batch_processing.log"
         
-        # Statistics
+        # Statistics tracking
         self.stats = {
-            'total_tickers': 0,
+            'start_time': None,
             'processed_tickers': 0,
             'successful_extractions': 0,
             'failed_extractions': 0,
-            'skipped_tickers': 0,
-            'rate_limit_errors': 0,
-            'sec_rate_limit_errors': 0,
             'single_target_rejections': 0,
-            'empty_filing_filtered': 0,
-            'start_time': None,
+            'api_ninjas_rate_limits': 0,
+            'sec_rate_limits': 0,
+            'retry_attempts': 0,
+            'retry_successes': 0,
+            'permanent_failures': 0,
             'last_processed': None,
             'current_ticker': None
         }
@@ -52,10 +54,16 @@ class ParallelBatchProcessor:
         self.low_upside_results = []
         self.results_lock = Lock()
         
-        # Global rate limiting - Extremely conservative to avoid ALL API failures
-        self.global_last_request_time = 0
-        self.global_min_request_interval = 3.0  # 3 seconds between ANY requests (global)
-        self.global_rate_lock = Lock()
+        # Processing settings (optimized for speed with intelligent rate limiting)
+        self.max_workers = 3  # Increased from 1 - SEC can handle 8 req/sec, we use 3 workers
+        self.global_min_request_interval = 1.0  # Reduced from 3.0s - faster processing
+        
+        # Rate limiting tracking
+        self.last_global_request = 0
+        self.global_lock = threading.Lock()
+        
+        # Initialize extractor
+        self.extractor = PSUPriceExtractorAPINinjas(api_key)
         
         # Load existing progress if available
         self.load_progress()
@@ -220,18 +228,27 @@ class ParallelBatchProcessor:
     
     def get_processing_time(self) -> str:
         """Calculate total processing time"""
-        if not self.stats['start_time']:
+        if not self.stats.get('start_time'):
             return "N/A"
         
-        start_time = datetime.fromisoformat(self.stats['start_time'])
-        end_time = datetime.now()
-        duration = end_time - start_time
-        
-        hours = duration.seconds // 3600
-        minutes = (duration.seconds % 3600) // 60
-        seconds = duration.seconds % 60
-        
-        return f"{hours}h {minutes}m {seconds}s"
+        try:
+            if isinstance(self.stats['start_time'], str):
+                start_time = datetime.fromisoformat(self.stats['start_time'])
+            else:
+                start_time = self.stats['start_time']
+                
+            end_time = datetime.now()
+            duration = end_time - start_time
+            
+            total_seconds = int(duration.total_seconds())
+            hours = total_seconds // 3600
+            minutes = (total_seconds % 3600) // 60
+            seconds = total_seconds % 60
+            
+            return f"{hours}h {minutes}m {seconds}s"
+        except Exception as e:
+            self.log_message(f"Error calculating processing time: {e}")
+            return "N/A"
     
     def log_message(self, message: str):
         """Log message to file and print to console"""
@@ -248,16 +265,16 @@ class ParallelBatchProcessor:
     
     def rate_limit(self):
         """Global rate limiting for ALL API calls across all threads"""
-        with self.global_rate_lock:
+        with self.global_lock:
             current_time = time.time()
-            time_since_last = current_time - self.global_last_request_time
+            time_since_last = current_time - self.last_global_request
             
             if time_since_last < self.global_min_request_interval:
                 sleep_time = self.global_min_request_interval - time_since_last
                 self.log_message(f"⏳ Global rate limiting: waiting {sleep_time:.1f}s")
                 time.sleep(sleep_time)
             
-            self.global_last_request_time = time.time()
+            self.last_global_request = time.time()
     
     def handle_rate_limit_error(self, ticker: str, retry_count: int = 0):
         """Handle rate limit errors with exponential backoff"""
@@ -292,118 +309,159 @@ class ParallelBatchProcessor:
         
         return tickers
     
-    def process_ticker(self, ticker: str) -> Optional[Dict]:
-        """Process a single ticker with rate limiting and error handling"""
+    def process_ticker(self, ticker: str) -> Dict:
+        """
+        Process a single ticker with comprehensive retry logic
+        """
         max_retries = 3
+        retry_delay = 2.0
+        retry_attempted = False
         
-        for retry_count in range(max_retries + 1):
+        for attempt in range(max_retries):
             try:
-                # Rate limiting
-                self.rate_limit()
+                # Track retry attempts
+                if attempt > 0:
+                    if not retry_attempted:
+                        with self.global_lock:
+                            self.stats['retry_attempts'] += 1
+                        retry_attempted = True
                 
-                # Create extractor for this thread
-                extractor = PSUPriceExtractorAPINinjas(self.api_key)
+                # Enforce global rate limiting
+                with self.global_lock:
+                    current_time = time.time()
+                    if self.last_global_request > 0:
+                        elapsed = current_time - self.last_global_request
+                        if elapsed < self.global_min_request_interval:
+                            wait_time = self.global_min_request_interval - elapsed
+                            self.log_message(f"⏳ Global rate limiting: waiting {wait_time:.1f}s")
+                            time.sleep(wait_time)
+                    self.last_global_request = time.time()
                 
-                # Extract PSU targets for this ticker
-                self.rate_limit()
-                result = extractor.extract_from_ticker(ticker)
+                # Attempt to process the ticker
+                print(f"🔍 Extracting PSU targets for {ticker}")
+                result = self.extractor.extract_from_ticker(ticker)
                 
-                # Check if extraction was successful (multiple targets required)
-                targets = result.get('psu_targets', [])
-                rejection_reason = result.get('rejection_reason', None)
+                # If we got a result after retrying, count it as a retry success
+                if retry_attempted and (result.get('psu_targets') or result.get('rejection_reason')):
+                    with self.global_lock:
+                        self.stats['retry_successes'] += 1
                 
-                if targets and len(targets) >= 2:
-                    # Successful extraction with multiple targets
-                    self.stats['successful_extractions'] += 1
+                # Check if extraction was successful
+                if result.get('psu_targets'):
+                    # Successful extraction
+                    self.log_message(f"✅ {ticker}: Found {len(result['psu_targets'])} targets ({result['search_months_back']} months)")
                     
-                    with self.results_lock:
-                        self.results.append(result)
-                        
-                        # Classify by upside
-                        furthest_upside = result.get('furthest_target_upside', 0)
-                        if furthest_upside > 40:
-                            self.high_upside_results.append(result)
-                        else:
-                            self.low_upside_results.append(result)
-                    
-                    self.log_message(f"✅ {ticker}: Found {len(targets)} targets (3 months)")
-                    
-                    # Log upside classification
+                    # Determine upside category
                     furthest_upside = result.get('furthest_target_upside', 0)
                     if furthest_upside > 40:
                         self.log_message(f"📁 {ticker}: HIGH UPSIDE ({furthest_upside:.1f}%)")
                     else:
                         self.log_message(f"📁 {ticker}: LOW UPSIDE ({furthest_upside:.1f}%)")
-                        
-                elif rejection_reason:
-                    # Explicitly rejected due to insufficient targets or other quality controls
-                    if 'unique target(s) found - minimum 2 required' in rejection_reason:
-                        self.stats['single_target_rejections'] += 1
+                    
+                    return result
+                    
+                elif 'rejection_reason' in result:
+                    # Rejection due to quality controls (not an error)
+                    rejection_reason = result['rejection_reason']
+                    if 'Only 1 unique target' in rejection_reason or 'Only 0 unique target' in rejection_reason:
                         self.log_message(f"❌ {ticker}: Single target rejected - {rejection_reason}")
+                        with self.global_lock:
+                            self.stats['single_target_rejections'] += 1
                     else:
-                        self.stats['failed_extractions'] += 1
-                        self.log_message(f"❌ {ticker}: Quality control rejection - {rejection_reason}")
+                        self.log_message(f"❌ {ticker}: Rejected - {rejection_reason}")
+                    return result
                     
-                elif result.get('error'):
-                    # Error occurred
-                    error_msg = result['error']
-                    if 'rate limit' in error_msg.lower() or '429' in error_msg:
-                        self.stats['rate_limit_errors'] += 1
-                        self.log_message(f"⏳ {ticker}: API Ninjas rate limit error - {error_msg}")
-                    elif 'sec' in error_msg.lower() or 'timeout' in error_msg.lower():
-                        self.stats['sec_rate_limit_errors'] += 1
-                        self.log_message(f"⏳ {ticker}: SEC website error - {error_msg}")
-                    else:
-                        self.log_message(f"❌ {ticker}: Error - {error_msg}")
-                    
-                    self.stats['failed_extractions'] += 1
                 else:
                     # No targets found
-                    self.stats['failed_extractions'] += 1
-                    self.log_message(f"❌ {ticker}: No PSU targets found (3 months)")
-                
-                self.stats['processed_tickers'] += 1
-                self.stats['last_processed'] = datetime.now().isoformat()
-                self.stats['current_ticker'] = ticker
-                
-                return result
-                
-            except Exception as e:
-                error_msg = str(e).lower()
-                
-                # Check if it's a rate limit error
-                if 'rate limit' in error_msg or '429' in error_msg or 'too many requests' in error_msg:
-                    self.stats['rate_limit_errors'] += 1
+                    error_msg = result.get('error', 'No PSU targets found')
+                    self.log_message(f"❌ {ticker}: {error_msg} ({result.get('search_months_back', 3)} months)")
+                    return result
                     
-                    if retry_count < max_retries:
-                        if self.handle_rate_limit_error(ticker, retry_count):
-                            continue  # Retry
-                        else:
-                            break  # Max retries exceeded
-                    else:
-                        self.log_message(f"💥 {ticker}: Max retries exceeded for rate limit")
+            except requests.exceptions.Timeout as e:
+                self.log_message(f"⏰ {ticker}: Timeout error on attempt {attempt + 1}/{max_retries}: {e}")
+                if attempt < max_retries - 1:
+                    time.sleep(retry_delay * (attempt + 1))  # Exponential backoff
+                    continue
                 else:
-                    # Non-rate-limit error, don't retry
-                    self.log_message(f"💥 {ticker}: Non-retryable error - {str(e)}")
-                    break
+                    return self._create_error_result(ticker, f"Timeout after {max_retries} attempts: {e}")
+                    
+            except requests.exceptions.RequestException as e:
+                if '429' in str(e) or 'rate limit' in str(e).lower():
+                    self.log_message(f"🚫 {ticker}: Rate limit hit on attempt {attempt + 1}/{max_retries}")
+                    with self.global_lock:
+                        if 'api.api-ninjas.com' in str(e):
+                            self.stats['api_ninjas_rate_limits'] += 1
+                        elif 'sec.gov' in str(e):
+                            self.stats['sec_rate_limits'] += 1
+                    
+                    if attempt < max_retries - 1:
+                        backoff_time = retry_delay * (2 ** attempt)  # Exponential backoff
+                        self.log_message(f"⏳ {ticker}: Backing off for {backoff_time:.1f}s before retry")
+                        time.sleep(backoff_time)
+                        continue
+                    else:
+                        return self._create_error_result(ticker, f"Rate limit exceeded after {max_retries} attempts")
+                else:
+                    self.log_message(f"🌐 {ticker}: Network error on attempt {attempt + 1}/{max_retries}: {e}")
+                    if attempt < max_retries - 1:
+                        time.sleep(retry_delay * (attempt + 1))
+                        continue
+                    else:
+                        return self._create_error_result(ticker, f"Network error after {max_retries} attempts: {e}")
+                        
+            except KeyError as e:
+                self.log_message(f"🔑 {ticker}: Data structure error on attempt {attempt + 1}/{max_retries}: Missing key {e}")
+                if attempt < max_retries - 1:
+                    time.sleep(retry_delay)
+                    continue
+                else:
+                    return self._create_error_result(ticker, f"Data structure error after {max_retries} attempts: {e}")
+                    
+            except ValueError as e:
+                self.log_message(f"📊 {ticker}: Data validation error on attempt {attempt + 1}/{max_retries}: {e}")
+                if attempt < max_retries - 1:
+                    time.sleep(retry_delay)
+                    continue
+                else:
+                    return self._create_error_result(ticker, f"Data validation error after {max_retries} attempts: {e}")
+                    
+            except Exception as e:
+                self.log_message(f"💥 {ticker}: Unexpected error on attempt {attempt + 1}/{max_retries}: {type(e).__name__}: {e}")
+                if attempt < max_retries - 1:
+                    time.sleep(retry_delay * (attempt + 1))
+                    continue
+                else:
+                    # Log the full traceback for debugging
+                    import traceback
+                    error_details = traceback.format_exc()
+                    self.log_message(f"🐛 {ticker}: Full error traceback:\n{error_details}")
+                    # Track as permanent failure
+                    with self.global_lock:
+                        self.stats['permanent_failures'] += 1
+                    return self._create_error_result(ticker, f"Unexpected error after {max_retries} attempts: {type(e).__name__}: {e}")
         
-        # If we get here, all retries failed or it was a non-retryable error
-        with self.results_lock:
-            self.stats['failed_extractions'] += 1
-            self.stats['processed_tickers'] += 1
-            self.stats['last_processed'] = datetime.now().isoformat()
-            
-            error_result = {
-                'ticker': ticker.upper(),
-                'psu_targets': [],
-                'error': f"Failed after {max_retries + 1} attempts: {str(e)}",
-                'processing_time': datetime.now().isoformat()
-            }
-            
-            self.results.append(error_result)
-            self.log_message(f"💥 {ticker}: Final failure after retries")
-        
-        return error_result
+        # This should never be reached, but just in case
+        with self.global_lock:
+            self.stats['permanent_failures'] += 1
+        return self._create_error_result(ticker, "Unknown error: retry loop completed without result")
+    
+    def _create_error_result(self, ticker: str, error_message: str) -> Dict:
+        """Create a standardized error result"""
+        return {
+            'ticker': ticker.upper(),
+            'error': error_message,
+            'current_price': None,
+            'psu_targets': [],
+            'filing_source': None,
+            'filing_date': None,
+            'nearest_target_upside': None,
+            'furthest_target_upside': None,
+            'form4_filings_found': 0,
+            'filings_analyzed': [],
+            'filing_content_snippets': [],
+            'search_months_back': 3,
+            'retry_failed': True
+        }
     
     def process_all_tickers_parallel(self, start_from: Optional[str] = None, max_tickers: Optional[int] = None):
         """Process all tickers in parallel"""
@@ -448,13 +506,51 @@ class ParallelBatchProcessor:
                 try:
                     result = future.result()
                     
-                    # Save progress every 10 tickers (very frequent due to slow processing)
+                    # Process the result and update statistics
+                    with self.results_lock:
+                        self.stats['processed_tickers'] += 1
+                        self.stats['last_processed'] = datetime.now().isoformat()
+                        self.stats['current_ticker'] = ticker
+                        
+                        # Determine result type and update statistics
+                        if result.get('psu_targets'):
+                            # Successful extraction
+                            self.stats['successful_extractions'] += 1
+                            self.results.append(result)
+                            
+                            # Classify by upside
+                            furthest_upside = result.get('furthest_target_upside', 0)
+                            if furthest_upside > 40:
+                                self.high_upside_results.append(result)
+                            else:
+                                self.low_upside_results.append(result)
+                                
+                        elif result.get('retry_failed'):
+                            # Failed after all retries
+                            self.stats['failed_extractions'] += 1
+                            self.results.append(result)
+                            
+                        elif 'rejection_reason' in result:
+                            # Quality control rejection (single target rejections already counted in process_ticker)
+                            pass  
+                            
+                        else:
+                            # No targets found
+                            self.stats['failed_extractions'] += 1
+                    
+                    # Save progress every 10 tickers
                     if (i + 1) % 10 == 0:
                         self.save_progress()
                         self.log_message(f"💾 Progress saved after {i + 1} tickers")
                     
                 except Exception as e:
                     self.log_message(f"💥 Unexpected error processing {ticker}: {str(e)}")
+                    # Even on unexpected error, count as processed and failed
+                    with self.results_lock:
+                        self.stats['processed_tickers'] += 1
+                        self.stats['failed_extractions'] += 1
+                        error_result = self._create_error_result(ticker, f"Executor error: {str(e)}")
+                        self.results.append(error_result)
                     continue
         
         # Final save
@@ -476,32 +572,48 @@ class ParallelBatchProcessor:
         print(f"  ✅ Successful extractions: {self.stats['successful_extractions']:,}")
         print(f"  ❌ Failed extractions: {self.stats['failed_extractions']:,}")
         print(f"  ❌ Single target rejections: {self.stats['single_target_rejections']:,}")
-        print(f"  ⏳ API Ninjas rate limits: {self.stats['rate_limit_errors']:,}")
-        print(f"  ⏳ SEC website rate limits: {self.stats['sec_rate_limit_errors']:,}")
+        print(f"  ⏳ API Ninjas rate limits: {self.stats['api_ninjas_rate_limits']:,}")
+        print(f"  ⏳ SEC website rate limits: {self.stats['sec_rate_limits']:,}")
+        print(f"  🔄 Retry attempts: {self.stats['retry_attempts']:,}")
+        print(f"  ✅ Retry successes: {self.stats['retry_successes']:,}")
+        print(f"  💀 Permanent failures: {self.stats['permanent_failures']:,}")
         
         total_processed = self.stats['processed_tickers']
         if total_processed > 0:
             success_rate = (self.stats['successful_extractions'] / total_processed) * 100
             single_target_rate = (self.stats['single_target_rejections'] / total_processed) * 100
-            rate_limit_rate = ((self.stats['rate_limit_errors'] + self.stats['sec_rate_limit_errors']) / total_processed) * 100
+            rate_limit_rate = ((self.stats['api_ninjas_rate_limits'] + self.stats['sec_rate_limits']) / total_processed) * 100
+            retry_success_rate = (self.stats['retry_successes'] / max(1, self.stats['retry_attempts'])) * 100
             
             print(f"\n📈 QUALITY METRICS (3 months, min 2 targets):")
             print(f"  ✅ Multi-target success rate: {success_rate:.1f}%")
             print(f"  ❌ Single target rejection rate: {single_target_rate:.1f}%")
             print(f"  ⏳ Total rate limit error rate: {rate_limit_rate:.1f}%")
+            print(f"  🔄 Retry success rate: {retry_success_rate:.1f}%")
         
         print(f"\n📁 RESULTS BREAKDOWN:")
         print(f"  🏆 High upside (>40%): {len(self.high_upside_results):,} companies")
         print(f"  📉 Low upside (≤40%): {len(self.low_upside_results):,} companies")
         print(f"  📊 Total with valid targets: {len(self.results):,} companies")
         
-        elapsed_time = time.time() - self.stats['start_time'] if self.stats['start_time'] else 0
-        if elapsed_time > 0:
-            rate = self.stats['processed_tickers'] / (elapsed_time / 3600)
-            print(f"\n⏱️  TIMING:")
-            print(f"  Total elapsed time: {elapsed_time/3600:.1f} hours")
-            print(f"  Processing rate: {rate:.1f} tickers/hour")
-            
+        # Calculate and display processing time
+        if self.stats['start_time']:
+            try:
+                if isinstance(self.stats['start_time'], str):
+                    start_time = datetime.fromisoformat(self.stats['start_time'])
+                else:
+                    start_time = self.stats['start_time']
+                    
+                elapsed_time = time.time() - start_time.timestamp()
+                hours = int(elapsed_time // 3600)
+                minutes = int((elapsed_time % 3600) // 60)
+                seconds = int(elapsed_time % 60)
+                print(f"⏱️  Total processing time: {hours}h {minutes}m {seconds}s")
+            except Exception as e:
+                print(f"⏱️  Total processing time: Unable to calculate ({e})")
+        else:
+            print(f"⏱️  Total processing time: Not available")
+        
         print(f"\n🎯 QUALITY IMPROVEMENTS APPLIED:")
         print(f"  ✅ 3-month search period (more recent data)")
         print(f"  ✅ Minimum 2 targets required (no single targets)")

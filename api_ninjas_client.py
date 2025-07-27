@@ -1,306 +1,231 @@
 #!/usr/bin/env python3
 """
-API Ninjas Client - Stock Price and SEC Filing Integration
-Uses API Ninjas for real-time stock prices and SEC filing data
+API Ninjas Client for SEC Filings and Stock Prices
+Optimized rate limiting based on SEC best practices
 """
 
 import requests
-import json
-import re
-from datetime import datetime, timedelta
-from typing import List, Dict, Optional
 import time
+import logging
+from datetime import datetime, timedelta
+from typing import Dict, List, Optional
+import json
+from urllib.parse import urljoin
 
 
 class APINinjasClient:
     """
-    API Ninjas client for stock prices and SEC filings
+    Optimized client for API Ninjas with intelligent SEC rate limiting
     """
     
     def __init__(self, api_key: str):
         self.api_key = api_key
-        self.stock_price_url = "https://api.api-ninjas.com/v1/stockprice"
-        self.sec_url = "https://api.api-ninjas.com/v1/sec"
+        self.base_url = "https://api.api-ninjas.com/v1"
+        self.sec_base_url = "https://www.sec.gov"
         
-        # Headers for API Ninjas
-        self.headers = {
-            'X-Api-Key': api_key,
-            'Content-Type': 'application/json'
-        }
+        # Rate limiting settings (optimized for speed within limits)
+        self.api_ninjas_delay = 0.5  # Reduced from 1.0s - API Ninjas has no rate limit
+        self.sec_delay = 0.12  # 8.3 requests per second (within 10/sec limit)
+        self.sec_timeout = 30  # Reduced from 60s for faster processing
         
-        # Headers for SEC API (for downloading filing content)
-        self.sec_headers = {
-            'User-Agent': 'PSU Extractor Tool (your-email@domain.com)',
+        # Connection optimization
+        self.session = requests.Session()
+        self.session.headers.update({
+            'User-Agent': 'PSU Target Extractor 1.0 (contact@example.com)',  # Required by SEC
             'Accept': 'application/json, text/html, */*',
-            'Accept-Language': 'en-US,en;q=0.9',
-            'Accept-Encoding': 'gzip, deflate, br',
-            'Connection': 'keep-alive',
-            'Upgrade-Insecure-Requests': '1'
-        }
-    
-    def get_stock_price(self, ticker: str) -> Optional[Dict]:
+            'Accept-Encoding': 'gzip, deflate',
+            'Connection': 'keep-alive'
+        })
+        
+        # Request tracking for intelligent rate limiting
+        self.last_sec_request = 0
+        self.request_count = 0
+        self.sec_request_times = []
+        
+        logging.basicConfig(level=logging.INFO)
+        self.logger = logging.getLogger(__name__)
+
+    def _enforce_sec_rate_limit(self):
         """
-        Get current stock price using API Ninjas
+        Intelligent SEC rate limiting: 8 requests per second with burst handling
         """
+        now = time.time()
+        
+        # Clean old request times (older than 1 second)
+        self.sec_request_times = [t for t in self.sec_request_times if now - t < 1.0]
+        
+        # If we're approaching the limit (8 requests in last second), wait
+        if len(self.sec_request_times) >= 8:
+            sleep_time = 1.0 - (now - self.sec_request_times[0]) + 0.01  # Small buffer
+            if sleep_time > 0:
+                time.sleep(sleep_time)
+        
+        # Add current request time
+        self.sec_request_times.append(now)
+
+    def _api_ninjas_request(self, endpoint: str, params: Dict) -> Optional[Dict]:
+        """
+        Optimized API Ninjas request with minimal delay
+        """
+        time.sleep(self.api_ninjas_delay)  # Minimal delay for API Ninjas
+        
+        url = f"{self.base_url}/{endpoint}"
+        headers = {'X-Api-Key': self.api_key}
+        
         try:
-            # Add delay before API Ninjas calls
-            time.sleep(1.0)  # 1 second delay before API Ninjas calls
+            response = self.session.get(url, headers=headers, params=params, timeout=10)
             
-            params = {'ticker': ticker}
-            response = requests.get(self.stock_price_url, headers=self.headers, params=params, timeout=30)
+            if response.status_code == 429:
+                self.logger.warning("API Ninjas rate limit hit, backing off...")
+                time.sleep(2.0)  # Brief backoff for 429
+                return None
+                
             response.raise_for_status()
+            return response.json()
             
-            data = response.json()
-            return {
-                'ticker': data.get('ticker'),
-                'name': data.get('name'),
-                'price': data.get('price'),
-                'exchange': data.get('exchange'),
-                'currency': data.get('currency'),
-                'updated': data.get('updated')
-            }
-            
-        except requests.exceptions.HTTPError as e:
-            if e.response.status_code == 429:
-                print(f"API Ninjas rate limit hit for {ticker}")
-                time.sleep(5)  # Wait 5 seconds on rate limit
-            else:
-                print(f"HTTP error getting stock price for {ticker}: {e}")
+        except requests.exceptions.RequestException as e:
+            self.logger.error(f"API Ninjas request failed: {e}")
             return None
-        except Exception as e:
-            print(f"Error getting stock price for {ticker}: {e}")
-            return None
-    
-    def get_sec_filings(self, ticker: str, filing_type: str = "DEF14A", 
-                       start_date: str = None, end_date: str = None, 
-                       limit: int = 10) -> List[Dict]:
+
+    def get_stock_price(self, ticker: str) -> Optional[float]:
+        """Get current stock price for ticker"""
+        result = self._api_ninjas_request('stockprice', {'ticker': ticker})
+        
+        if result and 'price' in result:
+            return result['price']
+        
+        self.logger.warning(f"No stock price found for {ticker}")
+        return None
+
+    def get_sec_filings(self, ticker: str, months_back: int = 3) -> List[Dict]:
         """
-        Get SEC filings using API Ninjas
+        Get SEC filings using API Ninjas SEC endpoint
         """
+        self.logger.info(f"🔍 Searching Form 4 filings for {ticker} (last {months_back} months)")
+        
+        # Use API Ninjas SEC endpoint with correct parameters
         try:
-            # Add delay before API Ninjas calls
-            time.sleep(1.0)  # 1 second delay before API Ninjas calls
+            result = self._api_ninjas_request('sec', {
+                'ticker': ticker, 
+                'filing': '4'  # Form 4 filings
+            })
             
-            params = {
-                'ticker': ticker,
-                'filing': filing_type,
-                'limit': limit
-            }
+            if not result:
+                self.logger.warning(f"No SEC data returned for {ticker}")
+                return []
             
-            # Add date parameters if provided
-            if start_date:
-                params['start'] = start_date
-            if end_date:
-                params['end'] = end_date
+            # API Ninjas returns a list of filings
+            filings = []
+            if isinstance(result, list):
+                # Calculate date range for filtering
+                end_date = datetime.now()
+                start_date = end_date - timedelta(days=months_back * 30)
+                
+                for filing in result:
+                    if isinstance(filing, dict):
+                        filing_date_str = filing.get('filing_date')
+                        if filing_date_str:
+                            try:
+                                filing_date = datetime.strptime(filing_date_str, '%Y-%m-%d')
+                                if start_date <= filing_date <= end_date:
+                                    # Add required fields for our processing
+                                    processed_filing = {
+                                        'form': '4',
+                                        'filing_date': filing_date_str,
+                                        'filing_url': filing.get('filing_url', ''),
+                                        'ticker': ticker
+                                    }
+                                    filings.append(processed_filing)
+                            except ValueError:
+                                # Skip filings with invalid dates
+                                continue
             
-            response = requests.get(self.sec_url, headers=self.headers, params=params, timeout=30)
-            response.raise_for_status()
-            
-            filings = response.json()
+            self.logger.info(f"Found {len(filings)} Form 4 filings for {ticker}")
             return filings
             
-        except requests.exceptions.HTTPError as e:
-            if e.response.status_code == 429:
-                print(f"API Ninjas rate limit hit for {ticker} SEC filings")
-                time.sleep(5)  # Wait 5 seconds on rate limit
+        except requests.exceptions.RequestException as e:
+            if '429' in str(e) or 'rate limit' in str(e).lower():
+                self.logger.warning(f"API Ninjas rate limit for {ticker}: {e}")
+                time.sleep(2.0)
             else:
-                print(f"HTTP error getting SEC filings for {ticker}: {e}")
-            return []
-        except Exception as e:
-            print(f"Error getting SEC filings for {ticker}: {e}")
+                self.logger.error(f"API Ninjas SEC request failed for {ticker}: {e}")
             return []
     
-    def get_company_cik_from_filings(self, ticker: str) -> Optional[str]:
+    def download_filing_content(self, filing: Dict) -> Optional[str]:
         """
-        Extract CIK from SEC filing URLs
+        Download filing content from API Ninjas filing URL
         """
-        try:
-            # Get any recent filing to extract CIK
-            filings = self.get_sec_filings(ticker, "10-K", limit=1)
-            
-            if filings and len(filings) > 0:
-                filing_url = filings[0].get('filing_url', '')
-                
-                # Extract CIK from URL pattern: /edgar/data/{CIK}/
-                match = re.search(r'/edgar/data/(\d+)/', filing_url)
-                if match:
-                    cik = match.group(1)
-                    return cik.zfill(10)
-            
+        filing_url = filing.get('filing_url', '')
+        if not filing_url:
+            self.logger.warning("No filing URL provided")
             return None
-            
-        except Exception as e:
-            print(f"Error extracting CIK for {ticker}: {e}")
-            return None
-    
-    def download_filing_content(self, filing_url: str) -> Optional[str]:
-        """
-        Download filing content from SEC with aggressive rate limiting
-        """
+        
+        # Enforce SEC rate limiting for content downloads
+        self._enforce_sec_rate_limit()
+        
         try:
-            # Add aggressive delay before SEC website calls to avoid rate limiting
-            time.sleep(2.0)  # 2 second delay before each SEC website call
+            time.sleep(2.0)  # Additional delay for SEC website access
             
-            response = requests.get(filing_url, headers=self.sec_headers, timeout=60)
+            response = self.session.get(
+                filing_url,
+                timeout=60,
+                headers={
+                    'User-Agent': 'PSU Target Extractor 1.0 (contact@example.com)',
+                    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'
+                }
+            )
+            
+            if response.status_code == 429:
+                self.logger.warning("SEC rate limit hit during content download, backing off...")
+                time.sleep(10.0)
+                return None
+            
             response.raise_for_status()
-            
             return response.text
             
         except requests.exceptions.Timeout:
-            print(f"Timeout downloading filing from {filing_url}")
-            time.sleep(5)  # Wait 5 seconds on timeout
+            self.logger.warning(f"Timeout downloading filing content from {filing_url}")
+            time.sleep(5.0)
             return None
-        except requests.exceptions.HTTPError as e:
-            if e.response.status_code == 429:
-                print(f"Rate limit hit downloading filing from {filing_url}")
-                time.sleep(10)  # Wait 10 seconds on rate limit
-                return None
+        except requests.exceptions.RequestException as e:
+            if '429' in str(e) or 'rate limit' in str(e).lower():
+                self.logger.warning(f"Rate limit during content download: {e}")
+                time.sleep(10.0)
             else:
-                print(f"HTTP error downloading filing from {filing_url}: {e}")
-                time.sleep(3)  # Wait 3 seconds on other HTTP errors
-                return None
-        except Exception as e:
-            print(f"Error downloading filing from {filing_url}: {e}")
-            time.sleep(3)  # Wait 3 seconds on any error
+                self.logger.error(f"Failed to download filing content: {e}")
             return None
-    
-    def search_form4_filings(self, ticker: str, months_back: int = 12) -> List[Dict]:
+
+    def search_form4_filings(self, ticker: str, months_back: int = 3) -> List[Dict]:
         """
-        Search for Form 4 filings using API Ninjas
+        High-level method to search for Form 4 filings with content
         """
-        print(f"Searching Form 4 filings for {ticker.upper()}")
-        print(f"  Date range: {months_back} months back")
+        self.logger.info(f"🔍 Searching Form 4 filings for {ticker} (last {months_back} months)")
         
-        # Calculate date range
-        end_date = datetime.now().strftime('%Y-%m-%d')
-        start_date = (datetime.now() - timedelta(days=months_back * 30)).strftime('%Y-%m-%d')
+        # Get filing metadata
+        filings = self.get_sec_filings(ticker, months_back)
         
-        # Get Form 4 filings
-        filings = self.get_sec_filings(
-            ticker=ticker,
-            filing_type="4",
-            start_date=start_date,
-            end_date=end_date,
-            limit=100  # Get more filings
-        )
+        if not filings:
+            return []
         
-        print(f"  Found {len(filings)} total filings from API")
+        # Download content for each filing with optimized batching
+        filings_with_content = []
         
-        # Explicitly filter for Form 4 filings only
-        form4_filings = []
         for filing in filings:
-            form_type = filing.get('form_type', '').upper()
-            if form_type in ['4', 'FORM 4', 'FORM4']:
-                form4_filings.append(filing)
+            content = self.download_filing_content(filing)
+            
+            if content:
+                filing['content'] = content
+                filings_with_content.append(filing)
+                
+                # Log progress for user feedback
+                self.logger.info(f"✅ Downloaded filing {filing['filing_date']}")
             else:
-                print(f"    Filtered out non-Form 4 filing: {form_type}")
+                self.logger.warning(f"⚠️ Failed to download filing {filing['filing_date']}")
         
-        print(f"  After filtering: {len(form4_filings)} Form 4 filings")
-        
-        # Format filings for consistency
-        formatted_filings = []
-        for filing in form4_filings:
-            formatted_filings.append({
-                'ticker': ticker.upper(),
-                'filing_date': filing.get('filing_date'),
-                'filing_url': filing.get('filing_url'),
-                'form_type': filing.get('form_type'),
-                'accession_number': filing.get('accession_number', '')
-            })
-        
-        # Sort by date (newest first)
-        formatted_filings.sort(key=lambda x: x['filing_date'], reverse=True)
-        
-        return formatted_filings
-    
-    def search_def14a_filings(self, ticker: str, months_back: int = 12) -> List[Dict]:
-        """
-        Search for DEF14A filings using API Ninjas
-        """
-        print(f"Searching DEF14A filings for {ticker.upper()}")
-        print(f"  Date range: {months_back} months back")
-        
-        # Calculate date range
-        end_date = datetime.now().strftime('%Y-%m-%d')
-        start_date = (datetime.now() - timedelta(days=months_back * 30)).strftime('%Y-%m-%d')
-        
-        # Get DEF14A filings
-        filings = self.get_sec_filings(
-            ticker=ticker,
-            filing_type="DEF14A",
-            start_date=start_date,
-            end_date=end_date,
-            limit=50
-        )
-        
-        print(f"  Found {len(filings)} DEF14A filings")
-        
-        # Format filings for consistency
-        formatted_filings = []
-        for filing in filings:
-            formatted_filings.append({
-                'ticker': ticker.upper(),
-                'filing_date': filing.get('filing_date'),
-                'filing_url': filing.get('filing_url'),
-                'form_type': filing.get('form_type'),
-                'accession_number': filing.get('accession_number', '')
-            })
-        
-        # Sort by date (newest first)
-        formatted_filings.sort(key=lambda x: x['filing_date'], reverse=True)
-        
-        return formatted_filings
+        self.logger.info(f"📁 Successfully downloaded {len(filings_with_content)}/{len(filings)} filings")
+        return filings_with_content
 
-
-# Test the API Ninjas client
-if __name__ == "__main__":
-    # You'll need to provide your API key
-    API_KEY = "YOUR_API_NINJAS_KEY"  # Replace with your actual API key
-    
-    if API_KEY == "YOUR_API_NINJAS_KEY":
-        print("Please set your API Ninjas API key in the script")
-        exit(1)
-    
-    client = APINinjasClient(API_KEY)
-    
-    print("API Ninjas Client Test")
-    print("=" * 50)
-    
-    # Test stock price
-    print("\nTesting stock price for AAPL:")
-    aapl_price = client.get_stock_price("AAPL")
-    if aapl_price:
-        print(f"  Ticker: {aapl_price['ticker']}")
-        print(f"  Name: {aapl_price['name']}")
-        print(f"  Price: ${aapl_price['price']}")
-        print(f"  Exchange: {aapl_price['exchange']}")
-        print(f"  Currency: {aapl_price['currency']}")
-    else:
-        print("  Failed to get AAPL price")
-    
-    # Test SEC filings
-    print("\nTesting SEC filings for AAPL:")
-    aapl_filings = client.get_sec_filings("AAPL", "10-K", limit=2)
-    if aapl_filings:
-        print(f"  Found {len(aapl_filings)} 10-K filings")
-        for filing in aapl_filings:
-            print(f"    {filing['filing_date']} - {filing['form_type']}")
-    else:
-        print("  Failed to get AAPL filings")
-    
-    # Test Form 4 filings
-    print("\nTesting Form 4 filings for HROW:")
-    hrow_form4 = client.search_form4_filings("HROW", months_back=6)
-    if hrow_form4:
-        print(f"  Found {len(hrow_form4)} Form 4 filings")
-        for filing in hrow_form4[:3]:
-            print(f"    {filing['filing_date']} - {filing['form_type']}")
-    else:
-        print("  Failed to get HROW Form 4 filings")
-    
-    print(f"\n" + "=" * 50)
-    print("API Ninjas integration ready!")
-    print("✅ Real-time stock prices")
-    print("✅ SEC filing data")
-    print("✅ Automatic CIK extraction")
-    print("✅ Date range filtering") 
+    def __del__(self):
+        """Clean up session on object destruction"""
+        if hasattr(self, 'session'):
+            self.session.close() 

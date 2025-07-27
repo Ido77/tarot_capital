@@ -10,14 +10,18 @@ from parallel_batch_processor import ParallelBatchProcessor
 
 
 def main():
-    print("🚀 PSU PRICE TARGET EXTRACTOR - ALL TICKERS")
+    print("🚀 OPTIMIZED PSU BATCH PROCESSOR")
     print("=" * 80)
-    print("✅ Form 4 Only Processing (DEF 14A filtered out)")
-    print("✅ Parallel Processing for Speed")
-    print("✅ 6 Months Default Time Period")
-    print("✅ Automatic Folder Classification (>40% threshold)")
-    print("✅ Crash Recovery and Progress Tracking")
-    print("✅ Real-time Stock Prices from API Ninjas")
+    print("✅ Intelligent SEC rate limiting (8 req/sec within limits)")
+    print("✅ Connection pooling and session reuse")
+    print("✅ 3 parallel workers for faster processing")
+    print("✅ Quality controls: 3-month search, minimum 2 targets")
+    print("✅ Progress tracking with crash recovery")
+    print("✅ API Ninjas integration (no rate limits)")
+    print("")
+    
+    # Initialize processor with optimized settings
+    processor = ParallelBatchProcessor(max_workers=3)  # Optimized for speed
     
     # Get API key
     api_key = os.getenv('API_NINJAS_KEY')

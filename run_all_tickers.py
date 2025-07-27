@@ -10,6 +10,8 @@ from parallel_batch_processor import ParallelBatchProcessor
 
 
 def main():
+    """Main function to run all tickers processing"""
+    
     print("🚀 OPTIMIZED PSU BATCH PROCESSOR")
     print("=" * 80)
     print("✅ Intelligent SEC rate limiting (8 req/sec within limits)")
@@ -20,23 +22,24 @@ def main():
     print("✅ API Ninjas integration (no rate limits)")
     print("")
     
-    # Initialize processor with optimized settings
-    processor = ParallelBatchProcessor(max_workers=3)  # Optimized for speed
-    
-    # Get API key
-    api_key = os.getenv('API_NINJAS_KEY')
-    if not api_key:
+    # Get API key first
+    from config_api_ninjas import APINinjasConfig
+    config = APINinjasConfig()
+    if not config.api_key:
         print(f"\n{'='*80}")
         print("API KEY REQUIRED")
-        print(f"{'='*80}")
-        print("Please enter your API Ninjas API key:")
-        print("1. Get your API key from: https://api-ninjas.com/")
-        print("2. Or enter it below:")
-        api_key = input("API Key: ").strip()
-        
-        if not api_key or api_key == "YOUR_API_NINJAS_KEY":
-            print("❌ No valid API key provided. Exiting.")
-            return
+        print("=" * 80)
+        print("❌ No API key found!")
+        print("📝 Please add your API key to api_key.txt")
+        print("🔗 Get your key from: https://api-ninjas.com/")
+        return
+    
+    # Initialize processor with API key and optimized settings
+    processor = ParallelBatchProcessor(
+        api_key=config.api_key,
+        tickers_file='tickers.txt',
+        max_workers=3  # Optimized for speed
+    )
     
     # Check if tickers file exists
     tickers_file = "tickers.txt"
@@ -79,37 +82,17 @@ def main():
     print("INITIALIZING PARALLEL PROCESSOR")
     print(f"{'='*80}")
     
+    print("✅ Parallel processor initialized")
+    print("✅ 3 workers ready (optimized)")
+    print("✅ Form 4 only filtering enabled")
+    print("✅ 3-month search period (recent data)")
+    print("✅ Minimum 2 targets required (quality control)")
+    print("✅ Empty filings filtered out")
+    print("✅ Single target rejection enabled")
+    print("✅ Enhanced retry logic enabled (3 retries)")
+    print("✅ Intelligent rate limiting enabled")
+    
     try:
-        processor = ParallelBatchProcessor(
-            api_key=api_key,
-            tickers_file=tickers_file,
-            max_workers=1  # Ultra-aggressive to eliminate rate limits
-        )
-        
-        print("✅ Parallel processor initialized")
-        print("✅ 1 worker ready (ultra-aggressive)")
-        print("✅ Form 4 only filtering enabled")
-        print("✅ 3-month search period (recent data)")
-        print("✅ Minimum 2 targets required (quality control)")
-        print("✅ Empty filings filtered out")
-        print("✅ Single target rejection enabled")
-        print("✅ Global rate limiting enabled (3s between requests)")
-        print("✅ API Ninjas delays enabled")
-        print("✅ SEC website delays enabled")
-        print("✅ Retry logic with exponential backoff")
-        print("✅ Progress tracking enabled")
-        print("✅ File writing enabled")
-        
-        # Start processing
-        print(f"\n{'='*80}")
-        print("STARTING PROCESSING")
-        print(f"{'='*80}")
-        print("🚀 Processing all tickers with improved quality controls...")
-        print("📊 Progress will be saved every 10 tickers")
-        print("💾 Results will be saved to output/ folders")
-        print("🎯 Only companies with 2+ PSU targets will be accepted")
-        print("⏹️  Press Ctrl+C to stop and save progress")
-        
         processor.process_all_tickers_parallel()
         
     except KeyboardInterrupt:

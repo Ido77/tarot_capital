@@ -60,8 +60,26 @@ class PSUPriceExtractorAPINinjas:
         """
         targets = []
         
-        # First, identify PSU-related sections
-        psu_keywords = ['PSU', 'performance', 'stock', 'vest', 'vesting', 'target', 'hurdle']
+        # First, identify PSU-related sections with stronger filtering
+        psu_keywords = [
+            'PSU', 'performance stock unit', 'performance unit', 'performance share',
+            'performance-based', 'performance target', 'performance goal',
+            'vest', 'vesting', 'vesting schedule', 'vesting condition',
+            'target', 'hurdle', 'threshold', 'performance metric'
+        ]
+        
+        # Exclude non-PSU content that often contains dollar amounts
+        exclude_keywords = [
+            'warrant', 'exercise price', 'exercise of warrant',
+            'transaction cost', 'advisory cost', 'legal fee', 'accounting fee',
+            'merger', 'acquisition', 'exchange offer', 'tender offer',
+            'dividend', 'distribution', 'split', 'spinoff',
+            'underwriting', 'commission', 'expense', 'fee',
+            'registration', 'prospectus', 'offering price',
+            'market price', 'closing price', 'trading price',
+            'book value', 'net worth', 'assets', 'liabilities'
+        ]
+        
         psu_sections = []
         
         # Improved sentence splitting that preserves price ranges
@@ -78,72 +96,59 @@ class PSUPriceExtractorAPINinjas:
             sentence = re.sub(r'_TO_', ' to ', sentence)
             sentence = re.sub(r'_DOT_', '.', sentence)
             
-            if any(keyword.lower() in sentence.lower() for keyword in psu_keywords):
+            sentence_lower = sentence.lower()
+            
+            # Must contain PSU-related keywords
+            has_psu_keywords = any(keyword.lower() in sentence_lower for keyword in psu_keywords)
+            
+            # Must NOT contain excluded content
+            has_excluded = any(exclude.lower() in sentence_lower for exclude in exclude_keywords)
+            
+            if has_psu_keywords and not has_excluded:
                 psu_sections.append(sentence)
+        
+        # Only proceed if we found actual PSU-related content
+        if not psu_sections:
+            return []
         
         # First check for price ranges - these are often the most accurate
         for section in psu_sections:
             for pattern in self.range_patterns:
-                matches = re.findall(pattern, section, re.IGNORECASE)
-                for match in matches:
-                    try:
-                        # Range patterns return tuples (lower, upper)
-                        if isinstance(match, tuple) and len(match) == 2:
-                            lower_price = float(match[0])
-                            upper_price = float(match[1])
-                            if 0.5 <= lower_price <= 1000 and 0.5 <= upper_price <= 1000:
-                                targets.append(lower_price)
-                                targets.append(upper_price)
-                        else:
-                            price = float(match)
-                            if 0.5 <= price <= 1000:
-                                targets.append(price)
-                    except ValueError:
-                        continue
+                for match in re.finditer(pattern, section, re.IGNORECASE):
+                    # Extract all groups as potential targets
+                    for i in range(1, len(match.groups()) + 1):
+                        try:
+                            target_str = match.group(i).replace('$', '').strip()
+                            targets.append(float(target_str))
+                        except ValueError:
+                            continue
         
-        # Apply primary patterns to PSU sections if no ranges found
+        # If no range targets found, apply primary and secondary patterns
         if not targets:
             for section in psu_sections:
                 for pattern in self.primary_patterns:
-                    matches = re.findall(pattern, section, re.IGNORECASE)
-                    for match in matches:
+                    for match in re.finditer(pattern, section, re.IGNORECASE):
                         try:
-                            price = float(match)
-                            if 0.5 <= price <= 1000:  # Reasonable price range
-                                targets.append(price)
+                            target_str = match.group(1).replace('$', '').strip()
+                            targets.append(float(target_str))
                         except ValueError:
                             continue
+                
+                if not targets:
+                    for section in psu_sections:
+                        for pattern in self.secondary_patterns:
+                            for match in re.finditer(pattern, section, re.IGNORECASE):
+                                try:
+                                    target_str = match.group(1).replace('$', '').strip()
+                                    targets.append(float(target_str))
+                                except ValueError:
+                                    continue
         
-        # Apply secondary patterns if no primary targets found
-        if not targets:
-            for section in psu_sections:
-                for pattern in self.secondary_patterns:
-                    matches = re.findall(pattern, section, re.IGNORECASE)
-                    for match in matches:
-                        try:
-                            price = float(match)
-                            if 0.5 <= price <= 1000:
-                                targets.append(price)
-                        except ValueError:
-                            continue
+        # Filter targets to a reasonable range for PSU targets
+        # PSU targets are typically $5-$500 per share for most companies
+        filtered_targets = [t for t in targets if 5.00 <= t <= 500.00]
         
-        # If still no targets, use simple dollar pattern on PSU sections
-        if not targets:
-            for section in psu_sections:
-                matches = re.findall(self.dollar_pattern, section)
-                for match in matches:
-                    try:
-                        price = float(match)
-                        if 0.5 <= price <= 1000:
-                            targets.append(price)
-                    except ValueError:
-                        continue
-        
-        # Remove duplicates and sort
-        targets = list(set(targets))
-        targets.sort()
-        
-        return targets
+        return list(set(filtered_targets)) # Remove duplicates
     
     def validate_psu_targets(self, targets: List[float], current_stock_price: float) -> List[float]:
         """

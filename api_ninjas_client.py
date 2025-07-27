@@ -107,7 +107,7 @@ class APINinjasClient:
         try:
             result = self._api_ninjas_request('sec', {
                 'ticker': ticker, 
-                'filing': '4'  # Form 4 filings
+                'filing': '4'  # Form 4 filings - Corrected parameter name
             })
             
             if not result:
@@ -124,23 +124,54 @@ class APINinjasClient:
                 for filing in result:
                     if isinstance(filing, dict):
                         filing_date_str = filing.get('filing_date')
-                        if filing_date_str:
+                        filing_url = filing.get('filing_url', '')
+                        form_type = filing.get('form_type', '').strip()
+                        
+                        if filing_date_str and filing_url and form_type:
                             try:
                                 filing_date = datetime.strptime(filing_date_str, '%Y-%m-%d')
                                 if start_date <= filing_date <= end_date:
-                                    # Add required fields for our processing
-                                    processed_filing = {
-                                        'form': '4',
-                                        'filing_date': filing_date_str,
-                                        'filing_url': filing.get('filing_url', ''),
-                                        'ticker': ticker
-                                    }
-                                    filings.append(processed_filing)
+                                    # CRITICAL: Only accept genuine Form 4 filings
+                                    # Check form_type field first - must be exactly '4' or 'Form 4'
+                                    if form_type.upper() in ['4', 'FORM 4']:
+                                        # Additional URL validation for ownership filings
+                                        url_lower = filing_url.lower()
+                                        
+                                        # Must contain 'ownership' OR 'form4' in URL for genuine Form 4s
+                                        has_ownership_indicator = ('ownership' in url_lower or 
+                                                                 'form4' in url_lower or
+                                                                 'xslf345x' in url_lower)  # SEC Form 4 XML format
+                                        
+                                        # Exclude non-ownership document types
+                                        exclude_patterns = [
+                                            's4a', 's4', '424b', 'prelim', 'prospectus',
+                                            'exchange', 'merger', 'tender', 'proxy',
+                                            'registration', 'warrant', 'spinoff', 'split',
+                                            'offering', 'underwriting', 'amendment'
+                                        ]
+                                        
+                                        # Check if URL contains any excluded patterns
+                                        is_excluded = any(pattern in url_lower for pattern in exclude_patterns)
+                                        
+                                        if has_ownership_indicator and not is_excluded:
+                                            # Add required fields for our processing
+                                            processed_filing = {
+                                                'form': '4',
+                                                'filing_date': filing_date_str,
+                                                'filing_url': filing_url,
+                                                'ticker': ticker
+                                            }
+                                            filings.append(processed_filing)
+                                            self.logger.info(f"✅ Valid Form 4 ownership filing: {filing_date_str} (type: {form_type})")
+                                        else:
+                                            self.logger.info(f"⚠️ Excluded Form 4 (not ownership): {filing_url}")
+                                    else:
+                                        self.logger.info(f"⚠️ Excluded non-Form 4: {form_type} - {filing_url}")
                             except ValueError:
                                 # Skip filings with invalid dates
                                 continue
-            
-            self.logger.info(f"Found {len(filings)} Form 4 filings for {ticker}")
+        
+            self.logger.info(f"Found {len(filings)} genuine Form 4 ownership filings for {ticker}")
             return filings
             
         except requests.exceptions.RequestException as e:

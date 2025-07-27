@@ -159,7 +159,7 @@ class PSUPriceExtractorAPINinjas:
         
         return valid_targets
     
-    def extract_from_ticker(self, ticker: str) -> Dict:
+    def extract_from_ticker(self, ticker: str, months_back: int = 3) -> Dict:
         """
         Extract PSU price targets from a specific ticker
         """
@@ -182,14 +182,14 @@ class PSUPriceExtractorAPINinjas:
                     'form4_filings_found': 0,
                     'filings_analyzed': [],
                     'filing_content_snippets': [],
-                    'search_months_back': 3
+                    'search_months_back': months_back
                 }
             
             current_price = float(price_data)  # price_data is already a float
             print(f"  Current price: ${current_price}")
             
             # Get Form 4 filings
-            filings = self.api_client.search_form4_filings(ticker, months_back=3)
+            filings = self.api_client.search_form4_filings(ticker, months_back=months_back)
             print(f"  Found {len(filings)} Form 4 filings")
             
             if not filings:
@@ -204,7 +204,7 @@ class PSUPriceExtractorAPINinjas:
                     'form4_filings_found': 0,
                     'filings_analyzed': [],
                     'filing_content_snippets': [],
-                    'search_months_back': 3
+                    'search_months_back': months_back
                 }
             
             # Process each filing
@@ -290,7 +290,7 @@ class PSUPriceExtractorAPINinjas:
                     'form4_filings_found': len(filings),
                     'filings_analyzed': [],
                     'filing_content_snippets': [],
-                    'search_months_back': 3,
+                    'search_months_back': months_back,
                     'rejection_reason': f'Only {len(unique_targets)} unique target(s) found - minimum 2 required'
                 }
             
@@ -315,7 +315,7 @@ class PSUPriceExtractorAPINinjas:
                     'form4_filings_found': len(filings),
                     'filings_analyzed': [],
                     'filing_content_snippets': [],
-                    'search_months_back': 3,
+                    'search_months_back': months_back,
                     'rejection_reason': f'Only {len(valid_targets)} valid target(s) after validation - minimum 2 required'
                 }
             
@@ -347,7 +347,7 @@ class PSUPriceExtractorAPINinjas:
                 'form4_filings_found': len(filings),
                 'filings_analyzed': filings_analyzed,
                 'filing_content_snippets': filing_content_snippets,
-                'search_months_back': 3
+                'search_months_back': months_back
             }
             
         except Exception as e:
@@ -364,7 +364,7 @@ class PSUPriceExtractorAPINinjas:
                 'form4_filings_found': 0,
                 'filings_analyzed': [],
                 'filing_content_snippets': [],
-                'search_months_back': 3
+                'search_months_back': months_back
             }
     
     def process_tickers(self, tickers: List[str]) -> List[Dict]:

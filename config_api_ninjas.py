@@ -40,7 +40,16 @@ class APINinjasConfig:
         if api_key:
             return api_key
         
-        # Try to read from file
+        # Try to read from api_key.txt file first
+        try:
+            with open('api_key.txt', 'r') as f:
+                api_key = f.read().strip()
+                if api_key:
+                    return api_key
+        except FileNotFoundError:
+            pass
+        
+        # Try to read from .api_ninjas_key file (legacy)
         try:
             with open('.api_ninjas_key', 'r') as f:
                 api_key = f.read().strip()
